@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worldclimate · Planetary Climate Simulator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%2213%22 fill=%22%232a6fb0%22/%3E%3Cpath d=%22M16 3a13 13 0 0 1 0 26z%22 fill=%22%23ffb35a%22/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+  { "imports": {
+      "three": "./vendor/three/build/three.module.js",
+      "three/addons/": "./vendor/three/addons/"
+  } }
+  </script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div id="loading">
+    <div class="ld-title">WORLDCLIMATE</div>
+    <div class="ld-sub">building terrain &amp; radiative-transfer tables…</div>
+    <div class="ld-bar"><div></div></div>
+  </div>
+
+  <header id="topbar">
+    <div class="brand">
+      <span class="logo">◐</span>
+      <span class="name">WORLDCLIMATE</span>
+      <span class="tag">planetary climate simulator</span>
+    </div>
+    <div class="preset-wrap">
+      <label for="preset">Scenario</label>
+      <select id="preset"></select>
+      <button id="btnReset" class="ghost" title="Restart the scenario with the current settings">↺ Restart</button>
+    </div>
+    <div class="top-actions">
+      <button id="btnHelp" class="ghost">? Guide</button>
+    </div>
+  </header>
+
+  <aside id="controls" class="panel">
+    <div class="panel-scroll" id="controlsBody"></div>
+  </aside>
+
+  <aside id="status" class="panel">
+    <div class="panel-scroll">
+      <section id="stateCard">
+        <div class="state-kicker">Climate state</div>
+        <div class="state-name" id="stateName">—</div>
+        <div class="state-tags" id="stateTags"></div>
+        <div class="state-desc" id="stateDesc"></div>
+        <div class="state-since" id="stateSince"></div>
+        <div class="alert" id="alertBox" hidden></div>
+      </section>
+
+      <section class="readouts" id="readouts"></section>
+
+      <section class="budget">
+        <div class="sec-title">Energy budget <span class="hint">W/m²</span></div>
+        <canvas id="budgetCanvas" height="74"></canvas>
+      </section>
+
+      <section class="chart">
+        <div class="sec-title">
+          <div class="tabs" id="chartTabs">
+            <button data-k="T" class="on">Temperature</button>
+            <button data-k="co2">CO₂</button>
+            <button data-k="water">Water</button>
+            <button data-k="pS">Pressure</button>
+            <button data-k="alb">Albedo</button>
+          </div>
+        </div>
+        <canvas id="tsCanvas" height="150"></canvas>
+      </section>
+
+      <section class="chart">
+        <div class="sec-title" id="profileTitle">Surface temperature by latitude</div>
+        <canvas id="profCanvas" height="130"></canvas>
+      </section>
+
+      <section class="composition">
+        <div class="sec-title">Atmosphere</div>
+        <div id="compBars"></div>
+      </section>
+
+      <section class="events">
+        <div class="sec-title">Event log</div>
+        <div id="eventLog"></div>
+      </section>
+    </div>
+  </aside>
+
+  <footer id="timebar">
+    <button id="btnPlay" class="play" title="Play / pause (Space)">▶</button>
+    <div class="time-block">
+      <div class="time-main" id="simTime">0 yr</div>
+      <div class="time-sub" id="simAge">star age 4.57 Gyr</div>
+    </div>
+    <div class="speed-block">
+      <div class="speed-labels"><span>1 yr/s</span><span id="speedLabel">10 kyr/s</span><span>100 Myr/s</span></div>
+      <input type="range" id="speed" min="0" max="8" step="0.01" value="4">
+      <div class="speed-sub" id="speedActual">achieved —</div>
+    </div>
+    <div class="speed-presets">
+      <button data-s="1">1 yr</button><button data-s="100">100 yr</button><button data-s="1e4">10 kyr</button>
+      <button data-s="1e6">1 Myr</button><button data-s="1e7">10 Myr</button><button data-s="1e8">100 Myr</button>
+    </div>
+  </footer>
+
+  <div id="help" hidden>
+    <div class="help-card">
+      <button class="close" id="helpClose">✕</button>
+      <h2>How it works</h2>
+      <p>Each latitude band (36 bands; substellar bands for tidally locked worlds) solves an energy balance with <b>full spectral radiative transfer</b>. Thermal emission comes from a line-envelope model of H₂O, CO₂, CH₄ and SO₂ with the water continuum and collision-induced absorption, calibrated to Earth's clear-sky OLR (265 W/m²), CO₂ forcing (3.7 W/m² per doubling) and the 282 W/m² steam-atmosphere limit. Sunlight goes through a 9-layer two-stream scheme that uses your star's actual spectrum.</p>
+      <p>Slow processes run alongside: the <b>carbonate–silicate cycle</b> (weathering, volcanic outgassing, ocean carbon, carbonate breakdown on hot surfaces), <b>ice sheets</b>, a deep ocean, <b>hydrogen escape</b> (diffusion- or energy-limited) that strips water and leaves O₂ behind, bulk atmospheric erosion, CO₂ frost, and the star's own evolution.</p>
+      <p><b>Time</b> is tied to the wall clock, not your frame rate. The solver is implicit and adaptive, so it automatically takes small steps through fast transitions (a runaway boiling an ocean off over thousands of years) and huge steps through quiet Myr. If your computer can't keep up, the achieved rate is shown honestly.</p>
+      <p><b>Try:</b> push instellation past ~1.15 S⊕ for a moist greenhouse, or ~1.25 S⊕ for a full runaway. Drop it below ~0.94 S⊕ and the planet snowballs, then thaws once volcanic CO₂ builds up over a few Myr. Remove most of the water to make a desert world, tidally lock it to make an eyeball, or shrink it to Mars size.</p>
+      <p class="small">Keys: <kbd>Space</kbd> play/pause · <kbd>[</kbd> <kbd>]</kbd> slower/faster · drag to orbit, scroll to zoom.</p>
+    </div>
+  </div>
+
+  <div id="tooltip" hidden></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

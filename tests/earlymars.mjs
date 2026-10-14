@@ -1,0 +1,10 @@
+import { ClimateModel, NB, TUNE } from '../js/sim/model.js';
+import { PRESETS } from '../js/sim/presets.js';
+const P = PRESETS.find(p => p.id === 'earlyMars');
+const m = new ClimateModel({ ...P.params, ...(JSON.parse(process.env.P||'{}')) });
+m._co2Condense = () => {};
+m.advance(3000);
+const T=m.s.T; let s='';
+for (let i=0;i<NB;i+=3) s+=`${(m.lat[i]*57.3).toFixed(0)}:${T[i].toFixed(0)} `;
+console.log('Tm', m.diag.Tmean.toFixed(1), 'pS', (m.diag.pS/1e5).toFixed(3), 'alb', m.diag.albedo.toFixed(3), 'D', Array.from(m.diag.D).slice(15,20).map(x=>x.toFixed(2)).join(','));
+console.log(s);
