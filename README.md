@@ -18,8 +18,10 @@ python3 -m http.server 8765
 
 No build step. three.js r170 is vendored in `vendor/` and the starfield is in `assets/`.
 
-**Controls:** drag to orbit, scroll to zoom, <kbd>Space</kbd> play/pause, <kbd>[</kbd>/<kbd>]</kbd> slower/faster.
-The left panel holds the star, orbit, planet, atmosphere and geology settings. Gas and water
+**Controls:** drag to orbit, scroll (or pinch) to zoom, <kbd>Space</kbd> play/pause, <kbd>[</kbd>/<kbd>]</kbd> slower/faster.
+On touch devices and narrow windows the two panels become slide-out drawers: tap the **Planet**
+tab on the left edge or the **Climate** tab on the right edge (or the state chip at the top), and
+tap the planet to close them. The left panel holds the star, orbit, planet, atmosphere and geology settings. Gas and water
 sliders *follow the evolving simulation*: grab one to override it. The right panel shows the
 climate-state classification, readouts, energy budget, history charts, latitude profile,
 composition and an event log.
@@ -32,6 +34,19 @@ An implicit (backward-Euler/Newton) solver with adaptive steps takes ~1-year ste
 transitions (an ocean boiling off, a snowball collapse) and up to 200-kyr steps through quiet
 eons. If the CPU cannot keep up, the time bar shows the *achieved* rate honestly. Typical
 throughput: ~250 Myr of a stable climate, or ~30 kyr of an active runaway, per second of compute.
+
+## Rendering cost
+
+The planet, clouds and Venus-like decks are procedural (dozens of simplex-noise octaves per pixel),
+which is far too expensive to evaluate every frame on tablets and phones. All static noise is baked
+once on the GPU into cube maps, and the slowly evolving, domain-warped cloud field is baked as
+keyframes 8 s apart that are cross-faded in the shader. The next keyframe is rendered one thin strip
+per frame, so no frame pays for more than ~1/200 of it. Only the finest cloud octaves are still
+evaluated live, on top of the baked warp, and only when zooming in makes them larger than a pixel.
+The terrain normal is precomputed in the worker. The image matches the fully procedural version
+(mean difference < 0.1 % on the surface) at roughly a quarter of the per-pixel cost. Rendering runs
+at the full device resolution (up to 2×), stepping down only as a last resort on a device that cannot
+hold ~40 fps.
 
 ## What is simulated
 

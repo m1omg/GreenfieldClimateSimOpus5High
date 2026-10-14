@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#04060b">
   <title>Worldclimate · Planetary Climate Simulator</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,12 +35,23 @@
     <div class="preset-wrap">
       <label for="preset">Scenario</label>
       <select id="preset"></select>
-      <button id="btnReset" class="ghost" title="Restart the scenario with the current settings">↺ Restart</button>
+      <button id="btnReset" class="ghost" title="Restart the scenario with the current settings">↺<span class="lbl"> Restart</span></button>
     </div>
     <div class="top-actions">
-      <button id="btnHelp" class="ghost">? Guide</button>
+      <button id="btnHelp" class="ghost" title="How it works">?<span class="lbl"> Guide</span></button>
     </div>
   </header>
+
+  <button id="hud" class="hud" title="Show climate status" hidden>
+    <span class="hud-state" id="hudState">—</span><span class="hud-t" id="hudT"></span>
+  </button>
+
+  <button class="drawer-tab left" id="tabControls" aria-controls="controls" aria-expanded="false">
+    <span class="ico">⚙</span><span class="txt">Planet</span>
+  </button>
+  <button class="drawer-tab right" id="tabStatus" aria-controls="status" aria-expanded="false">
+    <span class="ico">◔</span><span class="txt">Climate</span>
+  </button>
 
   <aside id="controls" class="panel">
     <div class="panel-scroll" id="controlsBody"></div>

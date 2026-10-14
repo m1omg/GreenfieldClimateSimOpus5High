@@ -5,9 +5,11 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { surfaceVert, surfaceFrag, cloudFrag, deckFrag, atmoVert, atmoFrag } from './shaders.js';
+import { surfaceVert, surfaceFrag, cloudFrag, deckFrag, atmoVert, atmoFrag, surfaceBakeFrag, detailBakeFrag, cloudBakeFrag, cloudWarpBakeFrag } from './shaders.js';
+import { CubeBaker, CloudKeyframes } from './bake.js';
 
 const NB = 36;
+const _inv = new THREE.Matrix4();
 
 const op0 = (lum) => Math.min(1, Math.max(0, (lum - 0.25) / 0.45));
 
@@ -26,7 +28,7 @@ function starRGB(Teff) {
 export class PlanetScene {
   constructor(canvas) {
     this.canvas = canvas;
-    const renderer = this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    const renderer = this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.0;
@@ -47,14 +49,25 @@ export class PlanetScene {
     this.sunDir = new THREE.Vector3(1, 0.15, 0.35).normalize();
     this.starColor = new THREE.Color(1, 0.95, 0.88);
 
-    // band data textures (float RGBA, NB x 1)
-    this.bandA = new THREE.DataTexture(new Float32Array(NB * 4), NB, 1, THREE.RGBAFormat, THREE.FloatType);
-    this.bandB = new THREE.DataTexture(new Float32Array(NB * 4), NB, 1, THREE.RGBAFormat, THREE.FloatType);
+    // band data textures (half-float RGBA, NB x 1: linear filtering works on every WebGL2 device)
+    this.bandA = new THREE.DataTexture(new Uint16Array(NB * 4), NB, 1, THREE.RGBAFormat, THREE.HalfFloatType);
+    this.bandB = new THREE.DataTexture(new Uint16Array(NB * 4), NB, 1, THREE.RGBAFormat, THREE.HalfFloatType);
     for (const t of [this.bandA, this.bandB]) {
       t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearFilter;
       t.wrapS = THREE.ClampToEdgeWrapping; t.needsUpdate = true;
     }
-    this.heightTex = new THREE.DataTexture(new Float32Array(4), 1, 1, THREE.RedFormat, THREE.FloatType);
+    this.heightTex = new THREE.DataTexture(new Uint16Array(4), 1, 1, THREE.RGBAFormat, THREE.HalfFloatType);
+
+    // procedural noise baked into cube maps once (and clouds as evolving keyframes)
+    const baker = this.baker = new CubeBaker(renderer);
+    this.noiseA = baker.target(1024);
+    this.noiseB = baker.target(1024);
+    baker.bakeAll(this.noiseA, baker.material(surfaceBakeFrag));
+    baker.bakeAll(this.noiseB, baker.material(detailBakeFrag));
+    this.cloudKeys = new CloudKeyframes(baker, [
+      { frag: cloudBakeFrag, size: 1024 },
+      { frag: cloudWarpBakeFrag, size: 512, format: THREE.RGBAFormat, precise: false },
+    ]);
 
     // group with obliquity tilt; planet spins inside it
     this.tilt = new THREE.Group();
@@ -75,7 +88,7 @@ export class PlanetScene {
       vertexShader: surfaceVert, fragmentShader: surfaceFrag,
       uniforms: {
         ...common,
-        uHeight: { value: this.heightTex }, uHeightSize: { value: new THREE.Vector2(1024, 512) },
+        uHeight: { value: this.heightTex }, uNoiseA: { value: this.noiseA.texture }, uNoiseB: { value: this.noiseB.texture },
         uSeaLevel: { value: 0 }, uHasOcean: { value: 1 }, uLife: { value: 1 }, uDesertTint: { value: 0 },
         uHot: { value: 0 }, uRust: { value: 0 },
       },
@@ -85,7 +98,10 @@ export class PlanetScene {
 
     this.cloudMat = new THREE.ShaderMaterial({
       vertexShader: surfaceVert, fragmentShader: cloudFrag, transparent: true, depthWrite: false,
-      uniforms: { ...common, uStorm: { value: 0 } },
+      uniforms: {
+        ...common, uStorm: { value: 0 },
+        uCloudA: { value: null }, uCloudB: { value: null }, uWarpA: { value: null }, uWarpB: { value: null }, uCloudMix: { value: 0 },
+      },
     });
     this.clouds = new THREE.Mesh(new THREE.SphereGeometry(1.012, 160, 80), this.cloudMat);
     this.spin.add(this.clouds);
@@ -93,7 +109,7 @@ export class PlanetScene {
     this.deckMat = new THREE.ShaderMaterial({
       vertexShader: surfaceVert, fragmentShader: deckFrag, transparent: true, depthWrite: false,
       uniforms: {
-        ...common, uDeckColor: { value: new THREE.Vector3(1, 0.9, 0.7) }, uOpacity: { value: 0 },
+        ...common, uNoiseA: { value: this.noiseA.texture }, uDeckColor: { value: new THREE.Vector3(1, 0.9, 0.7) }, uOpacity: { value: 0 },
         uGlow: { value: 0 }, uGlowColor: { value: new THREE.Vector3(1, 0.3, 0.1) },
       },
     });
@@ -169,28 +185,30 @@ export class PlanetScene {
     this.renderer.setSize(w, h, false);
     this.composer.setSize(w, h);
     this.camera.aspect = w / h;
+    // portrait screens: keep the horizontal field of view at least 36° so the planet fits
+    const half = Math.tan(18 * Math.PI / 180);
+    this.camera.fov = w >= h ? 36 : 2 * Math.atan(half * h / w) * 180 / Math.PI;
     this.camera.updateProjectionMatrix();
   }
 
   setHeightMap(hm) {
-    const tex = new THREE.DataTexture(hm.data, hm.W, hm.H, THREE.RedFormat, THREE.FloatType);
+    const tex = new THREE.DataTexture(hm.data, hm.W, hm.H, THREE.RGBAFormat, THREE.HalfFloatType);
     tex.magFilter = THREE.LinearFilter; tex.minFilter = THREE.LinearFilter;
     tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.ClampToEdgeWrapping;
     tex.needsUpdate = true;
     this.heightTex.dispose();
     this.heightTex = tex;
     this.surfaceMat.uniforms.uHeight.value = tex;
-    this.surfaceMat.uniforms.uHeightSize.value.set(hm.W, hm.H);
   }
 
   /** Update visual state from a simulation snapshot. */
   update(snap) {
     this.state = snap;
     const s = snap.summary, b = snap.bands, p = snap.params;
-    const A = this.bandA.image.data, B = this.bandB.image.data;
+    const A = this.bandA.image.data, B = this.bandB.image.data, h = THREE.DataUtils.toHalfFloat;
     for (let i = 0; i < NB; i++) {
-      A[i * 4] = b.T[i] / 400; A[i * 4 + 1] = b.sea[i]; A[i * 4 + 2] = b.snow[i]; A[i * 4 + 3] = b.ice[i];
-      B[i * 4] = b.fc[i]; B[i * 4 + 1] = b.tc[i] / 40; B[i * 4 + 2] = b.pr[i] / 3; B[i * 4 + 3] = b.co2[i];
+      A[i * 4] = h(b.T[i] / 400); A[i * 4 + 1] = h(b.sea[i]); A[i * 4 + 2] = h(b.snow[i]); A[i * 4 + 3] = h(b.ice[i]);
+      B[i * 4] = h(b.fc[i]); B[i * 4 + 1] = h(b.tc[i] / 40); B[i * 4 + 2] = h(b.pr[i] / 3); B[i * 4 + 3] = h(b.co2[i]);
     }
     this.bandA.needsUpdate = true; this.bandB.needsUpdate = true;
     const u = this.surfaceMat.uniforms;
@@ -243,6 +261,11 @@ export class PlanetScene {
   render(dtReal) {
     const t = performance.now() / 1000;
     this.common.uTime.value = t;
+    // cloud evolution: cross-fade baked keyframes, bake a strip of the next one
+    const ck = this.cloudKeys, cu = this.cloudMat.uniforms;
+    cu.uCloudMix.value = ck.step(dtReal);
+    cu.uCloudA.value = ck.keys[0][0].texture; cu.uCloudB.value = ck.keys[1][0].texture;
+    cu.uWarpA.value = ck.keys[0][1].texture; cu.uWarpB.value = ck.keys[1][1].texture;
     this.visualRotation += this.spinRate * dtReal;
     if (this.state && this.state.params.tidallyLocked) {
       // keep substellar point (object +x) facing the star
@@ -250,15 +273,12 @@ export class PlanetScene {
     }
     this.spin.rotation.y = this.visualRotation;
     this.spin.updateMatrixWorld(true);
-    const m3 = new THREE.Matrix3().setFromMatrix4(this.planet.matrixWorld);
-    this.common.uObjToWorld.value.copy(m3);
+    this.common.uObjToWorld.value.setFromMatrix4(this.planet.matrixWorld);
     // substellar point in object space (for locked planets)
-    const inv = new THREE.Matrix4().copy(this.planet.matrixWorld).invert();
-    const sObj = this.sunDir.clone().transformDirection(inv);
-    this.common.uSubstellar.value.copy(sObj);
+    _inv.copy(this.planet.matrixWorld).invert();
+    this.common.uSubstellar.value.copy(this.sunDir).transformDirection(_inv);
     // star position
-    const far = this.sunDir.clone().multiplyScalar(400);
-    this.starSprite.position.copy(far); this.starCore.position.copy(far);
+    this.starSprite.position.copy(this.sunDir).multiplyScalar(400); this.starCore.position.copy(this.starSprite.position);
     this.controls.update();
     this.composer.render();
   }

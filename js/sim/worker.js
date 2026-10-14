@@ -5,7 +5,7 @@ import { ClimateModel, NB, DEFAULT_PARAMS } from './model.js';
 import { classify, STATES } from './classify.js';
 import { STAR_TYPES } from './star.js';
 import { OCEAN_EARTH, G_EARTH } from './constants.js';
-import { buildHeightMap, downsample } from './terrain.js';
+import { buildHeightMap, downsample, heightGradientTexture } from './terrain.js';
 
 let model = null;
 let heightMap = null;
@@ -35,8 +35,8 @@ function makeTerrain(seed) {
   const W = 1024, H = 512;
   const hi = buildHeightMap(seed, W, H);
   heightMap = { W: 192, H: 96, data: downsample(hi, W, H, 192, 96) };
-  const copy = hi.slice();
-  post('terrain', { W, H, data: copy }, [copy.buffer]);
+  const tex = heightGradientTexture(hi, W, H);
+  post('terrain', { W, H, data: tex }, [tex.buffer]);
 }
 
 function build(p, keepTime = false) {

@@ -30,6 +30,11 @@ float fbm(vec3 p, int oct){
   for(int i=0;i<8;i++){ if(i>=oct) break; s+=a*snoise(p); p=p*2.03+vec3(1.7,9.2,3.1); a*=0.5; }
   return s;
 }
+// input of octave k (1-based) inside fbm(p, ...); its amplitude is 0.5^k
+vec3 octaveIn(vec3 p, int k){
+  for(int i=1;i<8;i++){ if(i>=k) break; p=p*2.03+vec3(1.7,9.2,3.1); }
+  return p;
+}
 `;
 
 const BAND_GLSL = /* glsl */`
@@ -40,6 +45,86 @@ uniform vec3 uSubstellar;   // object space
 float bandCoord(vec3 p){
   float x = uLocked > 0.5 ? dot(p, uSubstellar) : p.y;
   return (asin(clamp(x,-1.0,1.0)) / 3.14159265 + 0.5);
+}
+`;
+
+// ---------------------------------------------------------------- noise bakes
+// The expensive procedural noise is rendered once into cube maps (and, for the slowly
+// evolving clouds, into keyframes re-baked a strip at a time), so the per-pixel shaders
+// only sample textures. Values are stored as n*0.5+0.5.
+export const bakeVert = /* glsl */`
+varying vec3 vDir;
+void main(){
+  vDir = position;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+// r: continents-scale fbm, g: medium fbm, b: fine noise, a: deck bands (Venus-like streaks)
+export const surfaceBakeFrag = /* glsl */`
+precision highp float;
+${NOISE_GLSL}
+varying vec3 vDir;
+void main(){
+  vec3 p = normalize(vDir);
+  float n1 = fbm(p*7.0, 4);
+  float n2 = fbm(p*31.0 + 4.0, 3);
+  float n3 = snoise(p*90.0);
+  float bands = fbm(vec3(p.x*1.5, p.y*9.0, p.z*1.5) + fbm(p*3.0, 3)*0.8, 5);
+  gl_FragColor = clamp(vec4(n1, n2, n3, bands) * 0.5 + 0.5, 0.0, 1.0);
+}
+`;
+
+// rgb: small-scale relief normal perturbation; a: unused
+export const detailBakeFrag = /* glsl */`
+precision highp float;
+${NOISE_GLSL}
+varying vec3 vDir;
+void main(){
+  vec3 p = normalize(vDir);
+  vec3 det = vec3(snoise(p*60.0), snoise(p*60.0+17.0), snoise(p*60.0+31.0));
+  gl_FragColor = vec4(clamp(det * 0.5 + 0.5, 0.0, 1.0), 1.0);
+}
+`;
+
+// Cloud noise at evolution time uT: domain-warped fbm with extratropical streaks. The
+// finest octaves (main 6-7, streak 4-5) are left out here and added live in cloudFrag
+// on top of the baked warp, where they are resolved on screen.
+const CLOUD_WARP = /* glsl */`
+vec3 cloudWarp(vec3 q, float t){
+  return 0.55*vec3(fbm(q*2.3+t*0.008, 4), fbm(q*2.3+7.0, 4), fbm(q*2.3+13.0-t*0.008, 4));
+}
+float streakMix(vec3 q){ return 0.3*smoothstep(0.3,0.8,abs(q.y)); }
+vec3 streakIn(vec3 q, vec3 w){ return vec3(q.x*3.0, q.y*18.0, q.z*3.0) + w*0.25; }
+`;
+
+export const cloudBakeFrag = /* glsl */`
+precision highp float;
+${NOISE_GLSL}
+${CLOUD_WARP}
+uniform float uT;
+varying vec3 vDir;
+void main(){
+  vec3 q = normalize(vDir);
+  vec3 w = q*4.2 + cloudWarp(q, uT);
+  float n = fbm(w, 5) + 0.28*fbm(w*3.1 + 5.0, 3);
+  n = mix(n, fbm(streakIn(q, w), 3), streakMix(q));
+  gl_FragColor = vec4(clamp(n * 0.5 + 0.5, 0.0, 1.0), 0.0, 0.0, 1.0);
+}
+`;
+
+// rgb: the warp vector, a: coarse 4-octave field used for cloud self-shadowing
+export const cloudWarpBakeFrag = /* glsl */`
+precision highp float;
+${NOISE_GLSL}
+${CLOUD_WARP}
+uniform float uT;
+varying vec3 vDir;
+void main(){
+  vec3 q = normalize(vDir);
+  vec3 wp = cloudWarp(q, uT);
+  float c = fbm(q*4.2 + wp, 4);
+  gl_FragColor = clamp(vec4(wp / 0.55, c) * 0.5 + 0.5, 0.0, 1.0);
 }
 `;
 
@@ -60,8 +145,9 @@ export const surfaceFrag = /* glsl */`
 precision highp float;
 ${NOISE_GLSL}
 ${BAND_GLSL}
-uniform sampler2D uHeight;
-uniform vec2 uHeightSize;
+uniform sampler2D uHeight;    // rgb: tangential height gradient (object space), a: height (km)
+uniform samplerCube uNoiseA;  // baked noise (see surfaceBakeFrag)
+uniform samplerCube uNoiseB;  // baked relief detail (see detailBakeFrag)
 uniform float uSeaLevel;     // km (Earth-normalised height units)
 uniform float uHasOcean;
 uniform vec3 uSunDirW;       // world space, towards the star
@@ -84,7 +170,6 @@ vec2 equirect(vec3 p){
   float lon = atan(p.z, p.x);
   return vec2((lon + PI) / (2.0*PI), (PI*0.5 - lat) / PI);
 }
-float heightAt(vec3 p){ return texture2D(uHeight, equirect(p)).r; }
 
 vec3 blackbody(float T){
   // approximate blackbody colour (Tanner Helland fit), T in K
@@ -98,16 +183,11 @@ vec3 blackbody(float T){
 
 void main(){
   vec3 p = normalize(vPos);
-  float h = heightAt(p);
-  // bump normal from the height field
-  vec3 tA = normalize(cross(abs(p.y) < 0.99 ? vec3(0.0,1.0,0.0) : vec3(1.0,0.0,0.0), p));
-  vec3 tB = cross(p, tA);
-  // central differences over ~3 texels (avoids terracing artefacts) plus fine procedural relief
-  float e = 3.0 / uHeightSize.x * 6.2832;
-  float hA = heightAt(normalize(p + tA*e)) - heightAt(normalize(p - tA*e));
-  float hB = heightAt(normalize(p + tB*e)) - heightAt(normalize(p - tB*e));
-  vec3 gN = (tA*hA + tB*hB) / (2.0*e);
-  vec3 det = vec3(snoise(p*60.0), snoise(p*60.0+17.0), snoise(p*60.0+31.0)) * 0.06;
+  vec4 hg = texture2D(uHeight, equirect(p));
+  float h = hg.a;
+  vec3 gN = hg.rgb;
+  vec4 NA = textureCube(uNoiseA, p) * 2.0 - 1.0;
+  vec3 det = (textureCube(uNoiseB, p).rgb * 2.0 - 1.0) * 0.06;
   vec3 nObj = normalize(p - gN * 0.0045 + det * smoothstep(0.0, 1.0, h - uSeaLevel + 0.5) * 0.35);
 
   float bc = bandCoord(p);
@@ -118,9 +198,9 @@ void main(){
   float precip = B.b * 3.0;
   float co2 = B.a;
 
-  float n1 = fbm(p*7.0, 4);
-  float n2 = fbm(p*31.0 + 4.0, 3);
-  float n3 = snoise(p*90.0);
+  float n1 = NA.r;
+  float n2 = NA.g;
+  float n3 = NA.b;
 
   float depth = uSeaLevel - h;
   bool ocean = uHasOcean > 0.5 && depth > 0.0;
@@ -134,8 +214,15 @@ void main(){
 
   if (ocean) {
     // sea surface: no bathymetry bump, just a gentle wave normal
-    vec3 wv = vec3(snoise(p*180.0 + uTime*0.05), snoise(p*180.0 + 11.0 - uTime*0.05), snoise(p*180.0 + 23.0));
-    nObj = normalize(p + wv * 0.012);
+    // (the ~0.015 rad wave tilt only shows in the sun glint and the grazing-angle Fresnel
+    // sheen near the limb, so it is evaluated only there)
+    nObj = p;
+    vec3 Vw = normalize(cameraPosition - vWorld);
+    vec3 N0 = normalize(uObjToWorld * p);
+    if (dot(N0, normalize(normalize(uSunDirW) + Vw)) > 0.8 || dot(N0, Vw) < 0.4) {
+      vec3 wv = vec3(snoise(p*180.0 + uTime*0.05), snoise(p*180.0 + 11.0 - uTime*0.05), snoise(p*180.0 + 23.0));
+      nObj = normalize(p + wv * 0.012);
+    }
     float d = clamp(depth / 4.0, 0.0, 1.0);
     vec3 shallow = vec3(0.10, 0.42, 0.50);
     vec3 deep = vec3(0.012, 0.05, 0.13);
@@ -218,6 +305,7 @@ void main(){
 export const cloudFrag = /* glsl */`
 precision highp float;
 ${NOISE_GLSL}
+${CLOUD_WARP}
 ${BAND_GLSL}
 uniform vec3 uSunDirW;
 uniform vec3 uStarColor;
@@ -225,9 +313,16 @@ uniform float uTime;
 uniform float uStorm;      // 0..1 extra turbulence (hot regimes)
 uniform mat3 uObjToWorld;
 uniform float uExposure;
+uniform samplerCube uCloudA;   // baked cloud field, keyframe k
+uniform samplerCube uCloudB;   // keyframe k+1
+uniform samplerCube uWarpA;    // baked warp (rgb) and 4-octave field for self-shadowing (a), keyframe k
+uniform samplerCube uWarpB;
+uniform float uCloudMix;
 varying vec3 vPos;
 varying vec3 vNormalW;
 varying vec3 vWorld;
+float field(vec3 d){ return mix(textureCube(uCloudA, d).r, textureCube(uCloudB, d).r, uCloudMix) * 2.0 - 1.0; }
+vec4 warpAt(vec3 d){ return mix(textureCube(uWarpA, d), textureCube(uWarpB, d), uCloudMix) * 2.0 - 1.0; }
 void main(){
   vec3 p = normalize(vPos);
   float bc = bandCoord(p);
@@ -239,11 +334,26 @@ void main(){
   float shear = uTime * (0.010 + 0.006*cos(2.0*lat));
   float cs = cos(shear), sn = sin(shear);
   vec3 q = vec3(cs*p.x - sn*p.z, p.y, sn*p.x + cs*p.z);
-  // domain warp -> swirls and storm systems
-  vec3 w = q*4.2 + 0.55*vec3(fbm(q*2.3+uTime*0.008, 4), fbm(q*2.3+7.0, 4), fbm(q*2.3+13.0-uTime*0.008, 4));
-  float n = fbm(w, 7) + 0.28*fbm(w*3.1 + 5.0, 3);
-  // streaky texture in the extratropics
-  n = mix(n, fbm(vec3(q.x*3.0, q.y*18.0, q.z*3.0) + w*0.25, 5), 0.3*smoothstep(0.3,0.8,abs(p.y)));
+  float n = field(q);
+  // the finest octaves are below the cube-map resolution: evaluate them live on the baked
+  // warp, but only where they are larger than a pixel (i.e. when zoomed in)
+  float px = length(fwidth(q));
+  float a6 = 1.0 - smoothstep(0.2, 0.4, 145.0 * px);
+  if (a6 > 0.0) {
+    vec3 w = q*4.2 + warpAt(q).xyz * 0.55;
+    float a7 = 1.0 - smoothstep(0.2, 0.4, 294.0 * px);
+    float sm = streakMix(q);
+    // main fbm octaves 6-7 (~145 and ~294 per radius) and streak octaves 4-5 (~150, ~305)
+    float fine = 0.015625 * snoise(octaveIn(w, 6));
+    if (a7 > 0.0) fine += 0.0078125 * a7 * snoise(octaveIn(w, 7));
+    n += (1.0 - sm) * a6 * fine;
+    if (sm > 0.0) {
+      vec3 sp = streakIn(q, w);
+      float st = 0.0625 * snoise(octaveIn(sp, 4));
+      if (a7 > 0.0) st += 0.03125 * a7 * snoise(octaveIn(sp, 5));
+      n += sm * a6 * st;
+    }
+  }
   // map the noise (≈ Gaussian) so the covered area equals the simulated cloud fraction
   float z = n / 0.2;
   float pc = clamp(1.0 - cf, 0.002, 0.998);
@@ -252,8 +362,7 @@ void main(){
   float core = smoothstep(zt, zt + 1.6, z);
   float dens = cov * (1.0 - exp(-tau / 2.2)) * (0.45 + 0.55 * core);
   // cheap self-shadowing: denser cloud slightly towards the star -> darker
-  vec3 ws = w + normalize(uSubstellar) * 0.08;
-  float ns = (fbm(ws, 4)) / 0.2;
+  float ns = warpAt(q + normalize(uSubstellar) * 0.019).a / 0.2;
   float shadow = clamp((ns - z) * 0.25, -0.2, 0.35);
   vec3 N = normalize(vNormalW);
   vec3 L = normalize(uSunDirW);
@@ -270,7 +379,7 @@ void main(){
 
 export const deckFrag = /* glsl */`
 precision highp float;
-${NOISE_GLSL}
+uniform samplerCube uNoiseA;   // a: baked deck bands
 uniform vec3 uSunDirW;
 uniform vec3 uStarColor;
 uniform vec3 uDeckColor;
@@ -288,7 +397,7 @@ void main(){
   float sh = uTime * 0.02;
   vec3 q = vec3(cos(sh)*p.x - sin(sh)*p.z, p.y, sin(sh)*p.x + cos(sh)*p.z);
   // Venus-like banded streaks (super-rotation)
-  float bands = fbm(vec3(q.x*1.5, q.y*9.0, q.z*1.5) + fbm(q*3.0, 3)*0.8, 5);
+  float bands = textureCube(uNoiseA, q).a * 2.0 - 1.0;
   vec3 col = uDeckColor * (0.86 + 0.22*bands);
   vec3 N = normalize(vNormalW);
   vec3 L = normalize(uSunDirW);

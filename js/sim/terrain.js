@@ -133,3 +133,65 @@ export function downsample(h, W, H, w, hh) {
   }
   return out;
 }
+
+// ---------------------------------------------------------------- render texture
+const _f32 = new Float32Array(1), _u32 = new Uint32Array(_f32.buffer);
+/** float -> IEEE half bits (round to nearest). */
+function toHalf(v) {
+  _f32[0] = v;
+  const x = _u32[0];
+  let bits = (x >> 16) & 0x8000;
+  let m = (x >> 12) & 0x07ff;
+  const e = (x >> 23) & 0xff;
+  if (e < 103) return bits;
+  if (e > 142) return bits | 0x7c00;
+  if (e < 113) { m |= 0x0800; return bits | ((m >> (114 - e)) + ((m >> (113 - e)) & 1)); }
+  bits |= ((e - 112) << 10) | (m >> 1);
+  return bits + (m & 1);
+}
+
+/**
+ * Half-float RGBA texture for the renderer: rgb = tangential height gradient in object
+ * space (km per radian, central differences over ~3 texels), a = height (km). Doing this
+ * once here saves the surface shader six texture taps per pixel per frame.
+ */
+export function heightGradientTexture(h, W, H) {
+  const sample = (x, y, z) => {
+    // bilinear lookup matching GPU sampling (repeat in longitude, clamp in latitude)
+    const u = (Math.atan2(z, x) + Math.PI) / (2 * Math.PI);
+    const v = (Math.PI / 2 - Math.asin(Math.max(-1, Math.min(1, y)))) / Math.PI;
+    const fx = u * W - 0.5, fy = v * H - 0.5;
+    const i0 = Math.floor(fx), j0 = Math.floor(fy), ax = fx - i0, ay = fy - j0;
+    const ia = ((i0 % W) + W) % W, ib = (ia + 1) % W;
+    const ja = Math.max(0, Math.min(H - 1, j0)), jb = Math.max(0, Math.min(H - 1, j0 + 1));
+    return (h[ja * W + ia] * (1 - ax) + h[ja * W + ib] * ax) * (1 - ay) + (h[jb * W + ia] * (1 - ax) + h[jb * W + ib] * ax) * ay;
+  };
+  const at = (px, py, pz, dx, dy, dz, s) => {
+    const x = px + dx * s, y = py + dy * s, z = pz + dz * s, n = Math.hypot(x, y, z);
+    return sample(x / n, y / n, z / n);
+  };
+  const out = new Uint16Array(W * H * 4);
+  const e = 3 / W * 2 * Math.PI;
+  for (let j = 0; j < H; j++) {
+    const lat = Math.PI / 2 - (j + 0.5) / H * Math.PI;
+    const cl = Math.cos(lat), sl = Math.sin(lat);
+    for (let i = 0; i < W; i++) {
+      const lon = (i + 0.5) / W * 2 * Math.PI - Math.PI;
+      const px = cl * Math.cos(lon), py = sl, pz = cl * Math.sin(lon);
+      // tangent frame as in the shader: tA = normalize(cross(up, p)), tB = cross(p, tA)
+      let ux = 0, uy = 1, uz = 0;
+      if (Math.abs(py) >= 0.99) { ux = 1; uy = 0; }
+      let ax = uy * pz - uz * py, ay = uz * px - ux * pz, az = ux * py - uy * px;
+      const an = Math.hypot(ax, ay, az); ax /= an; ay /= an; az /= an;
+      const bx = py * az - pz * ay, by = pz * ax - px * az, bz = px * ay - py * ax;
+      const hA = at(px, py, pz, ax, ay, az, e) - at(px, py, pz, ax, ay, az, -e);
+      const hB = at(px, py, pz, bx, by, bz, e) - at(px, py, pz, bx, by, bz, -e);
+      const o = (j * W + i) * 4;
+      out[o] = toHalf((ax * hA + bx * hB) / (2 * e));
+      out[o + 1] = toHalf((ay * hA + by * hB) / (2 * e));
+      out[o + 2] = toHalf((az * hA + bz * hB) / (2 * e));
+      out[o + 3] = toHalf(h[j * W + i]);
+    }
+  }
+  return out;
+}

@@ -151,7 +151,7 @@ function buildControls() {
         rng.addEventListener('input', () => {
           const v = sliderToVal(c, rng.value / 1000);
           params[c.key] = v;
-          val.textContent = c.fmt(v);
+          val.textContent = c.fmt(v); val._v = undefined;
           val.classList.remove('live');
           setFill(rng);
           clearTimeout(tmr);
@@ -173,7 +173,7 @@ function syncControls(fromParams = true) {
     else if (sel) sel.value = params[k];
     else if (rng && fromParams) {
       rng.value = Math.round(valToSlider(c, params[k]) * 1000);
-      val.textContent = c.fmt(params[k]);
+      val.textContent = c.fmt(params[k]); val._v = undefined;
       setFill(rng);
     }
   }
@@ -183,14 +183,14 @@ function syncControls(fromParams = true) {
 function syncLive(sum) {
   for (const k in ctlEls) {
     const { c, rng, val, extra } = ctlEls[k];
-    if (extra && c.extra) extra.textContent = c.extra(sum);
+    if (extra && c.extra) setText(extra, c.extra(sum));
     if (!rng || !c.live || dragging.has(k)) continue;
     const v = c.live(sum);
     if (!isFinite(v)) continue;
-    rng.value = Math.round(valToSlider(c, v) * 1000);
-    val.textContent = c.fmt(v);
-    val.classList.add('live');
-    setFill(rng);
+    const pos = String(Math.round(valToSlider(c, v) * 1000));
+    if (rng.value !== pos) { rng.value = pos; setFill(rng); }
+    setText(val, c.fmt(v));
+    if (!val.classList.contains('live')) val.classList.add('live');
   }
 }
 
@@ -244,8 +244,50 @@ document.getElementById('btnHelp').onclick = () => help.hidden = false;
 document.getElementById('helpClose').onclick = () => help.hidden = true;
 help.onclick = (e) => { if (e.target === help) help.hidden = true; };
 
-// ------------------------------------------------------------------ status panel
+// ------------------------------------------------------------------ drawers (touch / narrow screens)
 const $ = (id) => document.getElementById(id);
+const drawerMQ = window.matchMedia('(max-width: 1100px), (pointer: coarse)');
+const phoneMQ = window.matchMedia('(max-width: 760px)');
+const body = document.body;
+function applyDrawerMode() {
+  body.classList.toggle('drawers', drawerMQ.matches);
+  $('hud').hidden = !drawerMQ.matches;
+  uiDirty = true;
+  requestAnimationFrame(() => scene._resize());
+}
+drawerMQ.addEventListener('change', applyDrawerMode);
+applyDrawerMode();
+function setDrawer(side, open) {
+  const cls = side === 'left' ? 'open-left' : 'open-right';
+  open = open ?? !body.classList.contains(cls);
+  // on a phone the two drawers would overlap: show one at a time
+  if (open && phoneMQ.matches) body.classList.remove(side === 'left' ? 'open-right' : 'open-left');
+  body.classList.toggle(cls, open);
+  $('tabControls').setAttribute('aria-expanded', body.classList.contains('open-left'));
+  $('tabStatus').setAttribute('aria-expanded', body.classList.contains('open-right'));
+  uiDirty = true;
+}
+$('tabControls').onclick = () => setDrawer('left');
+$('tabStatus').onclick = () => setDrawer('right');
+$('hud').onclick = () => setDrawer('right', true);
+// a tap (not a drag) on the planet closes open drawers
+{
+  const cv = $('scene');
+  let down = null;
+  cv.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+  cv.addEventListener('pointerup', (e) => {
+    if (!down || !body.classList.contains('drawers')) return;
+    const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+    if (moved < 8 && performance.now() - down.t < 350) { setDrawer('left', false); setDrawer('right', false); }
+    down = null;
+  });
+}
+const statusVisible = () => !body.classList.contains('drawers') || body.classList.contains('open-right');
+
+// ------------------------------------------------------------------ status panel
+// DOM writes only when the text actually changes (avoids layout work every update)
+const setText = (el, v) => { if (el._v !== v) { el._v = v; el.textContent = v; } };
+const setHTML = (el, v) => { if (el._v !== v) { el._v = v; el.innerHTML = v; } };
 let history = [];
 let lastHistT = -1;
 let chartKey = 'T';
@@ -269,11 +311,23 @@ function updateStatus() {
     lastHistT = s.t;
     if (history.length > 2400) history = history.filter((_, i) => i % 2 === 0 || i > history.length - 600);
   }
-  $('stateName').textContent = s.stateName;
-  $('stateName').style.color = s.stateColor;
-  $('stateDesc').textContent = s.stateDesc;
-  $('stateTags').innerHTML = s.tags.map(t => `<span>${t}</span>`).join('');
-  $('stateSince').textContent = `since ${fmtTime(s.stateSince)} · now ${fmtTime(s.t)}`;
+  // time bar and HUD (always visible)
+  setText($('simTime'), fmtTime(s.t));
+  setText($('simAge'), `star age ${s.age.toFixed(3)} Gyr · ${STAR_TYPES[snap.params.starType]?.name.split(' (')[0] || ''}`);
+  setText($('speedActual'), paused ? 'paused' : `achieved ${fmtRate(Math.max(0, snap.achieved))}${snap.achieved < speed * 0.7 ? ' (CPU-limited)' : ''}`);
+  if (body.classList.contains('drawers')) {
+    setText($('hudState'), s.stateName);
+    if ($('hudState')._c !== s.stateColor) { $('hudState')._c = s.stateColor; $('hudState').style.color = s.stateColor; }
+    setText($('hudT'), `${s.Tmean.toFixed(0)} K`);
+  }
+  if (body.classList.contains('open-left') || !body.classList.contains('drawers')) syncLive(s);
+  if (!statusVisible()) return;
+
+  setText($('stateName'), s.stateName);
+  if ($('stateName')._c !== s.stateColor) { $('stateName')._c = s.stateColor; $('stateName').style.color = s.stateColor; }
+  setText($('stateDesc'), s.stateDesc);
+  setHTML($('stateTags'), s.tags.map(t => `<span>${t}</span>`).join(''));
+  setText($('stateSince'), `since ${fmtTime(s.stateSince)} · now ${fmtTime(s.t)}`);
   // alerts
   let alert = '';
   if (s.state === 'runaway' && s.evapETA) alert = `Ocean is boiling off: ~${fmtTime(s.evapETA)} until it is gone at the current imbalance (+${s.imbalance.toFixed(1)} W/m²).`;
@@ -300,27 +354,37 @@ function updateStatus() {
     ['', 'Water lost to space', `${fmtEO(s.lostWaterEO)} <small>oceans</small>`],
     ['', 'Solver step', fmtTime(s.dt)],
   ];
-  $('readouts').innerHTML = ro.map(([c, k, v]) => `<div class="ro ${c}"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+  const roEl = $('readouts');
+  if (!roEl._cells) {
+    roEl.innerHTML = ro.map(([c, k]) => `<div class="ro ${c}"><span class="k">${k}</span><span class="v"></span></div>`).join('');
+    roEl._cells = [...roEl.querySelectorAll('.v')];
+  }
+  ro.forEach(([, , v], i) => setHTML(roEl._cells[i], v));
 
   // composition
   const pp = s.partials;
   const gases = [['N₂', pp.N2, '#7fa7ff'], ['O₂', pp.O2, '#9fe0c8'], ['CO₂', pp.CO2, '#ffb35a'], ['H₂O', s.pv, '#6cc4ff'],
     ['CH₄', pp.CH4, '#d6a2ff'], ['H₂', pp.H2, '#ff8fb0'], ['SO₂', pp.SO2, '#f2e27a']];
-  $('compBars').innerHTML = gases.map(([n, p, col]) => {
-    const b = p / 1e5;
-    const w = b > 0 ? clamp((Math.log10(b) + 8) / 10.5 * 100, 0, 100) : 0;
-    return `<div class="cb"><span class="g">${n}</span><div class="bar"><div style="width:${w}%;background:${col}"></div></div><span class="p">${b > 0 ? fmtBar(b) : '—'}</span></div>`;
-  }).join('');
+  const cbEl = $('compBars');
+  if (!cbEl._rows) {
+    cbEl.innerHTML = gases.map(([n, , col]) => `<div class="cb"><span class="g">${n}</span><div class="bar"><div style="background:${col}"></div></div><span class="p"></span></div>`).join('');
+    cbEl._rows = [...cbEl.querySelectorAll('.cb')].map(r => ({ bar: r.querySelector('.bar div'), p: r.querySelector('.p') }));
+  }
+  gases.forEach(([, p], i) => {
+    const b = p / 1e5, row = cbEl._rows[i];
+    const w = (b > 0 ? clamp((Math.log10(b) + 8) / 10.5 * 100, 0, 100) : 0).toFixed(1);
+    if (row.bar._w !== w) { row.bar._w = w; row.bar.style.width = w + '%'; }
+    setText(row.p, b > 0 ? fmtBar(b) : '—');
+  });
 
   // events
-  const evs = snap.events.slice().reverse();
-  $('eventLog').innerHTML = evs.map(e => `<div class="ev ${e.kind === 'user' ? 'user' : e.kind === 'start' ? '' : 'state'}"><span class="t">${fmtTime(e.t)}</span><span class="x">${e.text}</span></div>`).join('');
+  const evs = snap.events;
+  const evKey = evs.length + ':' + (evs.length ? evs[evs.length - 1].t + evs[evs.length - 1].text : '');
+  if ($('eventLog')._k !== evKey) {
+    $('eventLog')._k = evKey;
+    $('eventLog').innerHTML = evs.slice().reverse().map(e => `<div class="ev ${e.kind === 'user' ? 'user' : e.kind === 'start' ? '' : 'state'}"><span class="t">${fmtTime(e.t)}</span><span class="x">${e.text}</span></div>`).join('');
+  }
 
-  // time bar
-  $('simTime').textContent = fmtTime(s.t);
-  $('simAge').textContent = `star age ${s.age.toFixed(3)} Gyr · ${STAR_TYPES[snap.params.starType]?.name.split(' (')[0] || ''}`;
-  $('speedActual').textContent = paused ? 'paused' : `achieved ${fmtRate(Math.max(0, snap.achieved))}${snap.achieved < speed * 0.7 ? ' (CPU-limited)' : ''}`;
-  syncLive(s);
   drawBudget(s);
   drawSeries();
   drawProfile();
@@ -460,19 +524,25 @@ setPaused(false);
 
 let last = performance.now();
 let lastUI = 0;
-// adaptive render resolution: keep the frame rate smooth on weaker GPUs
-let dpr = Math.min(window.devicePixelRatio || 1, 2);
-let frameAcc = 0, frameN = 0, lastAdapt = performance.now();
+// Render at the full device resolution (up to 2x). Only if a device cannot hold ~40 fps
+// for several seconds is the resolution stepped down, never below 1 canvas pixel per CSS
+// pixel, and it is raised again once there is headroom. Changes are rare because each
+// one reallocates the post-processing buffers.
+const maxDpr = Math.min(window.devicePixelRatio || 1, 2);
+const minDpr = Math.min(1, maxDpr);
+let dpr = maxDpr;
+let frameAcc = 0, frameN = 0, lastAdapt = performance.now(), lastChange = 0, slowWindows = 0;
 function adaptResolution(now, dtMs) {
+  if (dtMs > 250) return;                    // tab switch / stall: not a rendering cost
   frameAcc += dtMs; frameN++;
-  if (now - lastAdapt < 1500) return;
+  if (now - lastAdapt < 2000) return;
   const avg = frameAcc / frameN;
   frameAcc = 0; frameN = 0; lastAdapt = now;
-  const maxDpr = Math.min(window.devicePixelRatio || 1, 2);
+  slowWindows = avg > 25 ? slowWindows + 1 : 0;
   let next = dpr;
-  if (avg > 26) next = Math.max(0.65, dpr * 0.85);
-  else if (avg < 14 && dpr < maxDpr) next = Math.min(maxDpr, dpr * 1.15);
-  if (Math.abs(next - dpr) > 0.02) { dpr = next; scene.setPixelRatio(dpr); }
+  if (slowWindows >= 2 && dpr > minDpr) { next = Math.max(minDpr, dpr * 0.85); slowWindows = 0; }
+  else if (avg < 12 && dpr < maxDpr && now - lastChange > 10000) next = Math.min(maxDpr, dpr * 1.15);
+  if (Math.abs(next - dpr) > 0.02) { dpr = next; lastChange = now; scene.setPixelRatio(dpr); }
 }
 function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
